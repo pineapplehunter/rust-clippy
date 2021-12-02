@@ -9,8 +9,10 @@ use clippy_utils::sugg::Sugg;
 use clippy_utils::{is_else_clause, is_expn_of};
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
+use rustc_hir::intravisit::{walk_expr, NestedVisitorMap, Visitor};
 use rustc_hir::{BinOpKind, Block, Expr, ExprKind, StmtKind, UnOp};
 use rustc_lint::{LateContext, LateLintPass};
+use rustc_middle::hir::map::Map;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::source_map::Spanned;
 use rustc_span::Span;
@@ -74,6 +76,41 @@ declare_clippy_lint! {
 
 declare_lint_pass!(NeedlessBool => [NEEDLESS_BOOL]);
 
+fn condition_needs_parentheses(e: &Expr<'_>) -> bool {
+    let mut visitor = NeedsParenScope::default();
+    walk_expr(&mut visitor, e);
+    visitor.scoped
+}
+
+#[derive(Default)]
+struct NeedsParenScope {
+    scoped: bool,
+}
+
+impl Visitor<'tcx> for NeedsParenScope {
+    type Map = Map<'tcx>;
+
+    fn visit_expr(&mut self, e: &'tcx Expr<'_>) {
+        if let ExprKind::Binary(op, l, _) = e.kind {
+            if op.node == BinOpKind::BitAnd {
+                let mut l = l;
+                while let ExprKind::Binary(_, _, r) = l.kind {
+                    l = r;
+                }
+                if let ExprKind::Block(..) = l.kind {
+                    self.scoped = true;
+                    return;
+                }
+            }
+        }
+        walk_expr(self, e);
+    }
+
+    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
+        NestedVisitorMap::None
+    }
+}
+
 impl<'tcx> LateLintPass<'tcx> for NeedlessBool {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
         use self::Expression::{Bool, RetBool};
@@ -97,6 +134,10 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessBool {
 
                 if is_else_clause(cx.tcx, e) {
                     snip = snip.blockify();
+                }
+
+                if condition_needs_parentheses(cond) {
+                    snip = snip.maybe_par();
                 }
 
                 span_lint_and_sugg(
